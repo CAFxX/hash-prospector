@@ -35,6 +35,7 @@ enum hf_type {
     HF32_ADD,  // x += const32
     HF32_ROT,  // x  = (x << const5) | (x >> (32 - const5))
     HF32_NOT,  // x  = ~x
+    HF32_BSWP, // x = BSWAP(x)
     HF32_XORL, // x ^= x << const5
     HF32_XORR, // x ^= x >> const5
     HF32_ADDL, // x += x << const5
@@ -45,6 +46,7 @@ enum hf_type {
     HF64_ADD,
     HF64_ROT,
     HF64_NOT,
+    HF64_BSWP,
     HF64_XORL,
     HF64_XORR,
     HF64_ADDL,
@@ -57,6 +59,7 @@ static const char hf_names[][8] = {
     [HF32_ADD]  = "32add",
     [HF32_ROT]  = "32rot",
     [HF32_NOT]  = "32not",
+    [HF32_BSWP] = "32bswp",
     [HF32_XORL] = "32xorl",
     [HF32_XORR] = "32xorr",
     [HF32_ADDL] = "32addl",
@@ -66,6 +69,7 @@ static const char hf_names[][8] = {
     [HF64_ADD]  = "64add",
     [HF64_ROT]  = "64rot",
     [HF64_NOT]  = "64not",
+    [HF64_BSWP] = "64bswp",
     [HF64_XORL] = "64xorl",
     [HF64_XORR] = "64xorr",
     [HF64_ADDL] = "64addl",
@@ -88,6 +92,8 @@ hf_randomize(struct hf_op *op, uint64_t s[2])
     switch (op->type) {
         case HF32_NOT:
         case HF64_NOT:
+        case HF32_BSWP:
+        case HF64_BSWP:
             op->constant = 0;
             break;
         case HF32_XOR:
@@ -140,11 +146,13 @@ hf_type_valid(enum hf_type a, enum hf_type b)
 {
     switch (a) {
         case HF32_NOT:
+        case HF32_BSWP:
         case HF32_XOR:
         case HF32_MUL:
         case HF32_ADD:
         case HF32_ROT:
         case HF64_NOT:
+        case HF64_BSWP:
         case HF64_XOR:
         case HF64_MUL:
         case HF64_ADD:
@@ -163,14 +171,48 @@ hf_type_valid(enum hf_type a, enum hf_type b)
     abort();
 }
 
+/* Return 1 if these operations may be the first or last one
+*/
+static int
+hf_type_valid_first_last(enum hf_type a)
+{
+    switch (a) {
+        case HF32_NOT:
+        case HF32_BSWP:
+        case HF32_ROT:
+        case HF64_NOT:
+        case HF64_BSWP:
+        case HF64_ROT:
+            return 0;
+        case HF32_XOR:
+        case HF32_MUL:
+        case HF32_ADD:
+        case HF32_XORL:
+        case HF32_XORR:
+        case HF32_ADDL:
+        case HF32_SUBL:
+        case HF64_XOR:
+        case HF64_MUL:
+        case HF64_ADD:
+        case HF64_XORL:
+        case HF64_XORR:
+        case HF64_ADDL:
+        case HF64_SUBL:
+            return 1;
+    }
+    abort();
+}
+
 static void
 hf_genfunc(struct hf_op *ops, int n, int flags, uint64_t s[2])
 {
-    hf_gen(ops, s, flags);
+    do {
+        hf_gen(ops, s, flags);
+    } while (!hf_type_valid_first_last(ops[0].type));
     for (int i = 1; i < n; i++) {
         do {
             hf_gen(ops + i, s, flags);
-        } while (!hf_type_valid(ops[i - 1].type, ops[i].type));
+        } while (!hf_type_valid(ops[i - 1].type, ops[i].type) || (i == n-1 && !hf_type_valid_first_last(ops[i].type)));
     }
 }
 
@@ -192,6 +234,12 @@ hf_print(const struct hf_op *op, char *buf)
         case HF32_NOT:
         case HF64_NOT:
             sprintf(buf, "x  = ~x;");
+            break;
+        case HF32_BSWP:
+            sprintf(buf, "x = __builtin_bswap32(x);");
+            break;
+        case HF64_BSWP:
+            sprintf(buf, "x = __builtin_bswap64(x);");
             break;
         case HF32_XOR:
             sprintf(buf, "x ^= UINT32_C(0x%08llx);", c);
@@ -280,6 +328,11 @@ hf_compile(const struct hf_op *ops, int n, unsigned char *buf)
                 *buf++ = 0xf7;
                 *buf++ = 0xd0;
                 break;
+            case HF32_BSWP:
+                /* bswap eax */
+                *buf++ = 0x0f;
+                *buf++ = 0xc8;
+                break;  
             case HF32_XOR:
                 /* xor eax, imm32 */
                 *buf++ = 0x35;
@@ -365,6 +418,12 @@ hf_compile(const struct hf_op *ops, int n, unsigned char *buf)
                 *buf++ = 0xf7;
                 *buf++ = 0xd0;
                 break;
+            case HF64_BSWP:
+                /* bswap rax */
+                *buf++ = 0x48;
+                *buf++ = 0x0f;
+                *buf++ = 0xc8;
+                break;  
             case HF64_XOR:
                 /* mov rdi, imm64 */
                 *buf++ = 0x48;
@@ -667,6 +726,8 @@ parse_operand(struct hf_op *op, char *buf)
     switch (op->type) {
         case HF32_NOT:
         case HF64_NOT:
+        case HF32_BSWP:
+        case HF64_BSWP:
             return 0;
         case HF32_XOR:
         case HF32_MUL:
